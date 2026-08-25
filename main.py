@@ -13,8 +13,14 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "7651339989:AAEH88cimbHLwq3D01
 TELEGRAM_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", 6084552159))
 
 WATCHLIST = [
-    "SOXL", "SPXL", "NVDU", "TSLL", "TECL", "TMF", "AGQ", "SCHD", 
-    "QQQ", "SPY", "AAPL", "NVDA", "TSLA", "AMD", "MSFT", "AMZN"
+    # Dev Teknoloji & Büyüme Hisseleri (2x Kaldıraçlı)
+    "AMZZ", "NFLU", "AVL", "SMCX", "GOOX", "FUGU", "PTIR",
+    
+    # Yarı İletken, Kripto & Dijital Varlıklar (2x Kaldıraçlı)
+    "USD", "CONL", "BITX",
+    
+    # Sektörel & Ters Korelasyonlu ETF'ler (2x / 3x Kaldıraçlı)
+    "LABU", "CURE", "ERX", "DRN", "RETU"
 ]
 
 TIMEFRAMES = {
