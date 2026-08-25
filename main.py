@@ -1,6 +1,5 @@
 import os
 import time
-import threading
 import requests
 import pandas as pd
 import numpy as np
@@ -13,13 +12,11 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "7651339989:AAEH88cimbHLwq3D01
 TELEGRAM_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", 6084552159))
 
 WATCHLIST = [
-    # Dev Teknoloji & Büyüme Hisseleri (2x Kaldıraçlı)
+    # Dev Teknoloji & Büyüme Hisseleri (2x)
     "AMZZ", "NFLU", "AVL", "SMCX", "GOOX", "FUGU", "PTIR",
-    
-    # Yarı İletken, Kripto & Dijital Varlıklar (2x Kaldıraçlı)
+    # Yarı İletken, Kripto & Dijital Varlıklar (2x)
     "USD", "CONL", "BITX",
-    
-    # Sektörel & Ters Korelasyonlu ETF'ler (2x / 3x Kaldıraçlı)
+    # Sektörel & Ters Korelasyonlu ETF'ler (2x / 3x)
     "LABU", "CURE", "ERX", "DRN", "RETU"
 ]
 
@@ -29,119 +26,139 @@ TIMEFRAMES = {
     "Günlük (1D)":    {"interval": "1d", "period": "60d"}
 }
 
-# Render'ın açık port bekleme uyarısını çözmek için basit HTTP Sunucusu
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot Active")
+        self.wfile.write(b"Bot is alive!")
 
-def start_health_server():
-    port = int(os.environ.get("PORT", 10000))
+def run_health_check_server():
+    port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    server.serve_forever()
+    import threading
+    threading.Thread(target=server.serve_forever, daemon=True).start()
 
-def send_telegram_msg(message):
+def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": str(message)}
-    for attempt in range(3):
-        try:
-            res = requests.post(url, json=payload, timeout=10)
-            if res.status_code == 200:
-                print("📲 Telegram bildirimi gönderildi.")
-                return True
-        except Exception as e:
-            print(f"❌ Baglanti hatasi: {e}")
-        time.sleep(2)
-    return False
-
-def fetch_and_process_data(ticker, tf_info):
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
     try:
-        # Yahoo Finance rate limit engeline takılmamak için 1.5 sn bekleme
-        time.sleep(1.5) 
-        df = yf.download(ticker, period=tf_info["period"], interval=tf_info["interval"], progress=False)
-        
-        if df.empty or len(df) < 25:
-            return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        if tf_info.get("resample") == "4h":
-            df = df.resample('4h').agg({
-                'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-            }).dropna()
-
-        if len(df) < 25:
-            return None
-
-        df['BB_Basis'] = df['Close'].rolling(window=20).mean()
-        df['BB_Std']   = df['Close'].rolling(window=20).std()
-        df['BB_Upper'] = df['BB_Basis'] + (2.2 * df['BB_Std'])
-        df['BB_Lower'] = df['BB_Basis'] - (2.2 * df['BB_Std'])
-
-        delta = df['Close'].diff()
-        gain  = (delta.where(delta > 0, 0)).rolling(window=3).mean()
-        loss  = (-delta.where(delta < 0, 0)).rolling(window=3).mean()
-        rs    = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-
-        low_14  = df['Low'].rolling(window=14).min()
-        high_14 = df['High'].rolling(window=14).max()
-        df['Stoch_K'] = 100 * ((df['Close'] - low_14) / (high_14 - low_14))
-        df['Stoch_D'] = df['Stoch_K'].rolling(window=3).mean()
-
-        ha_close = (df['Open'] + df['High'] + df['Low'] + df['Close']) / 4
-        ha_open = np.zeros(len(df))
-        ha_open[0] = (df['Open'].iloc[0] + df['Close'].iloc[0]) / 2
-        for i in range(1, len(df)):
-            ha_open[i] = (ha_open[i-1] + ha_close.iloc[i-1]) / 2
-            
-        df['HA_Green'] = ha_close > ha_open
-        df['HA_Red']   = ha_close < ha_open
-
-        curr = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        touch_lower = (df['Low'].iloc[-3:].min() <= curr['BB_Lower'])
-        touch_upper = (df['High'].iloc[-3:].max() >= curr['BB_Upper'])
-
-        rsi_hook_up   = (curr['RSI'] > prev['RSI']) and (prev['RSI'] <= 15.0)
-        rsi_hook_down = (curr['RSI'] < prev['RSI']) and (prev['RSI'] >= 85.0)
-
-        stoch_turn_up   = (prev['Stoch_K'] <= curr['Stoch_D'] and curr['Stoch_K'] > curr['Stoch_D']) or (curr['Stoch_K'] > prev['Stoch_K'] and prev['Stoch_K'] <= 15.0)
-        stoch_turn_down = (prev['Stoch_K'] >= curr['Stoch_D'] and curr['Stoch_K'] < curr['Stoch_D']) or (curr['Stoch_K'] < prev['Stoch_K'] and prev['Stoch_K'] >= 85.0)
-
-        long_sig  = touch_lower and curr['HA_Green'] and rsi_hook_up and stoch_turn_up
-        short_sig = touch_upper and curr['HA_Red'] and rsi_hook_down and stoch_turn_down
-
-        if long_sig:
-            return "🚀 DIP ALIM SINYALI", curr['Close'], curr['RSI'], curr['Stoch_K'], "HA Yesil"
-        elif short_sig:
-            return "🔻 TEPE SATIS SINYALI", curr['Close'], curr['RSI'], curr['Stoch_K'], "HA Kirmizi"
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"⚠️ Veri çekme hatası ({ticker}): {e}")
-    return None
+        print(f"Telegram hatasi: {e}")
 
-def run_screener():
-    print("⏳ Piyasa taranıyor...")
-    for tf_name, tf_info in TIMEFRAMES.items():
-        for ticker in WATCHLIST:
-            res = fetch_and_process_data(ticker, tf_info)
-            if res:
-                sig_type, price, rsi, stoch, ha_status = res
-                msg = (f"{sig_type}\n\n"
-                       f"Varlik: {ticker}\n"
-                       f"Periyot: {tf_name}\n"
-                       f"Kapanis Fiyati: ${price:.2f}\n"
-                       f"RSI (3): {rsi:.1f} | Stoch %K: {stoch:.1f}\n"
-                       f"Mum: {ha_status}")
-                send_telegram_msg(msg)
+def calculate_indicators(df):
+    # Bollinger Bands
+    df['SMA20'] = df['Close'].rolling(20).mean()
+    df['STD20'] = df['Close'].rolling(20).std()
+    df['Upper'] = df['SMA20'] + (df['STD20'] * 2)
+    df['Lower'] = df['SMA20'] - (df['STD20'] * 2)
 
-if __name__ == "__main__":
-    # Web sunucusunu arka planda başlat
-    threading.Thread(target=start_health_server, daemon=True).start()
-    send_telegram_msg("🤖 Screener Bot Render.com üzerinde 7/24 aktif edildi!")
+    # RSI (3)
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(3).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(3).mean()
+    rs = gain / loss.replace(0, np.nan)
+    df['RSI3'] = 100 - (100 / (1 + rs))
+
+    # Stochastic %K
+    low14 = df['Low'].rolling(14).min()
+    high14 = df['High'].rolling(14).max()
+    df['Stoch_K'] = 100 * ((df['Close'] - low14) / (high14 - low14))
+
+    # Heikin Ashi
+    ha_close = (df['Open'] + df['High'] + df['Low'] + df['Close']) / 4
+    ha_open = [ (df['Open'].iloc[0] + df['Close'].iloc[0]) / 2 ]
+    for i in range(1, len(df)):
+        ha_open.append((ha_open[-1] + ha_close.iloc[i-1]) / 2)
+    df['HA_Close'] = ha_close
+    df['HA_Open'] = ha_open
+    df['HA_Green'] = df['HA_Close'] > df['HA_Open']
+
+    # Volume Average
+    df['Vol_SMA20'] = df['Volume'].rolling(20).mean()
+    
+    return df
+
+def analyze_symbol(symbol):
+    for tf_name, tf_config in TIMEFRAMES.items():
+        try:
+            time.sleep(1.5) # Yahoo Finance Rate Limit Korumasi
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(period=tf_config["period"], interval=tf_config["interval"])
+            
+            if df.empty or len(df) < 25:
+                continue
+
+            if tf_config.get("resample") == "4h":
+                df = df.resample('4h').agg({
+                    'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+                }).dropna()
+
+            df = calculate_indicators(df)
+            
+            # Kapanmis son mumu al (Bar Close)
+            last = df.iloc[-2]
+
+            # Veri Temizleme & Sınır Kontrolü (RSI = 0 veya NaN Hatası Önleyici)
+            if pd.isna(last['RSI3']) or last['RSI3'] <= 1 or last['RSI3'] >= 99:
+                continue
+                
+            # Hacim Teyidi (Son mum hacmi > 20 mumluk ortalama hacim)
+            has_volume = last['Volume'] > (last['Vol_SMA20'] * 1.1)
+
+            # DIP ALIS SINYALI (4 Onay Aynı Anda)
+            is_dip_buy = (
+                last['Close'] <= last['Lower'] and
+                last['RSI3'] < 25 and
+                last['Stoch_K'] < 25 and
+                last['HA_Green'] and
+                has_volume
+            )
+
+            # TEPE SATIS SINYALI (4 Onay Aynı Anda)
+            is_tepe_sell = (
+                last['Close'] >= last['Upper'] and
+                last['RSI3'] > 75 and
+                last['Stoch_K'] > 75 and
+                (not last['HA_Green']) and
+                has_volume
+            )
+
+            if is_dip_buy:
+                msg = (
+                    f"🟢 <b>DİP ALIM SİNYALİ</b>\n\n"
+                    f"<b>Varlık:</b> {symbol}\n"
+                    f"<b>Periyot:</b> {tf_name}\n"
+                    f"<b>Fiyat:</b> ${last['Close']:.2f}\n"
+                    f"<b>RSI (3):</b> {last['RSI3']:.1f} | <b>Stoch %K:</b> {last['Stoch_K']:.1f}\n"
+                    f"<b>Mum:</b> HA Yeşil | <b>Hacim:</b> Onaylı"
+                )
+                send_telegram(msg)
+
+            elif is_tepe_sell:
+                msg = (
+                    f"🔴 <b>TEPE SATIŞ SİNYALİ</b>\n\n"
+                    f"<b>Varlık:</b> {symbol}\n"
+                    f"<b>Periyot:</b> {tf_name}\n"
+                    f"<b>Fiyat:</b> ${last['Close']:.2f}\n"
+                    f"<b>RSI (3):</b> {last['RSI3']:.1f} | <b>Stoch %K:</b> {last['Stoch_K']:.1f}\n"
+                    f"<b>Mum:</b> HA Kırmızı | <b>Hacim:</b> Onaylı"
+                )
+                send_telegram(msg)
+
+        except Exception as e:
+            print(f"{symbol} ({tf_name}) analiz hatasi: {e}")
+
+def main():
+    run_health_check_server()
+    send_telegram("🚀 <b>Hisse Screener Bot (Mükemmelleştirilmiş Sürüm) Aktif Edildi!</b>")
     
     while True:
-        run_screener()
+        print("Tarama baslatiliyor...")
+        for symbol in WATCHLIST:
+            analyze_symbol(symbol)
+        print("Tarama tamamlandi. 15 dakika bekleniyor...")
         time.sleep(900)
+
+if __name__ == "__main__":
+    main()
